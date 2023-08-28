@@ -308,20 +308,41 @@ SELECT (123)[2]
 
 # array slicing
 
-query error unimplemented: ARRAY slicing
-SELECT ARRAY['a', 'b', 'c'][:]
-
-query error unimplemented: ARRAY slicing
-SELECT ARRAY['a', 'b', 'c'][1:]
-
-query error unimplemented: ARRAY slicing
+#query error unimplemented: ARRAY slicing
+query T
 SELECT ARRAY['a', 'b', 'c'][1:2]
+----
+{a,b}
 
-query error unimplemented: ARRAY slicing
+#uery error unimplemented: ARRAY slicing
+query T
+SELECT ARRAY['a', 'b', 'c'][1:]
+----
+{a,b,c}
+
+query T
 SELECT ARRAY['a', 'b', 'c'][:2]
+----
+{a,b}
 
-query error unimplemented: ARRAY slicing
+query T
+SELECT ARRAY['a', 'b', 'c'][:]
+----
+{a,b,c}
+
+query T
 SELECT ARRAY['a', 'b', 'c'][2:1]
+----
+NULL
+
+#query error unimplemented: ARRAY slicing
+#SELECT ARRAY['a', 'b', 'c'][1:2]
+
+#query error unimplemented: ARRAY slicing
+#SELECT ARRAY['a', 'b', 'c'][:2]
+
+#query error unimplemented: ARRAY slicing
+#SELECT ARRAY['a', 'b', 'c'][2:1]
 
 # other forms of indirection
 
@@ -470,10 +491,10 @@ query TT
 SHOW CREATE TABLE a
 ----
 a  CREATE TABLE public.a (
-     b INT8[] NULL,
-     rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-     CONSTRAINT a_pkey PRIMARY KEY (rowid ASC)
-   )
+   b INT8[] NULL,
+   rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
+   CONSTRAINT a_pkey PRIMARY KEY (rowid ASC)
+)
 
 statement ok
 DROP TABLE a
@@ -530,10 +551,10 @@ query TT
 SHOW CREATE TABLE a
 ----
 a  CREATE TABLE public.a (
-     b INT8[] NULL,
-     rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-     CONSTRAINT a_pkey PRIMARY KEY (rowid ASC)
-   )
+   b INT8[] NULL,
+   rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
+   CONSTRAINT a_pkey PRIMARY KEY (rowid ASC)
+)
 
 statement error could not parse "foo" as type int
 INSERT INTO a VALUES (ARRAY['foo'])
@@ -602,10 +623,10 @@ query TT
 SHOW CREATE TABLE a
 ----
 a  CREATE TABLE public.a (
-     b INT2[] NULL,
-     rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-     CONSTRAINT a_pkey PRIMARY KEY (rowid ASC)
-   )
+   b INT2[] NULL,
+   rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
+   CONSTRAINT a_pkey PRIMARY KEY (rowid ASC)
+)
 
 statement error integer out of range for type int2
 INSERT INTO a VALUES (ARRAY[100000])
@@ -2272,25 +2293,3 @@ SELECT ('foo'::STRING || col::STRING[])::STRING[] FROM (VALUES (ARRAY['bar':::ST
 ----
 {foo,bar}
 {foo,baz}
-
-# Regression test for #87919 - datum concatenation should be performed for
-# null arguments.
-statement ok
-CREATE TABLE t1_87919 (
-  a  INT
-);
-CREATE TABLE t2_87919 (
-  b INT,
-  c TIME[]
-);
-INSERT INTO t1_87919 (a) VALUES (NULL);
-INSERT INTO t2_87919 (c) VALUES (ARRAY['03:23:06.042923']);
-
-query T rowsort
-SELECT ('09:20:35.19023'::TIME || c)::TIME[] AS col_25551
-FROM t1_87919
-FULL JOIN t2_87919 ON a = b
-ORDER BY a;
-----
-{09:20:35.19023}
-{09:20:35.19023,03:23:06.042923}

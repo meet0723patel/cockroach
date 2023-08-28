@@ -22,7 +22,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree/treebin"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree/treecmp"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
 	"github.com/cockroachdb/errors"
 )
 
@@ -67,7 +66,7 @@ type TypedExpr interface {
 	// should be replaced prior to expression evaluation by an
 	// appropriate WalkExpr. For example, Placeholder should be replaced
 	// by the argument passed from the client.
-	Eval(context.Context, ExprEvaluator) (Datum, error)
+	Eval(ExprEvaluator) (Datum, error)
 }
 
 // VariableExpr is an Expr that may change per row. It is used to
@@ -347,10 +346,8 @@ func (node *ParenExpr) TypedInnerExpr() TypedExpr {
 
 // StripParens strips any parentheses surrounding an expression and
 // returns the inner expression. For instance:
-//
-//	 1   -> 1
-//	(1)  -> 1
-//
+//   1   -> 1
+//  (1)  -> 1
 // ((1)) -> 1
 func StripParens(expr Expr) Expr {
 	if p, ok := expr.(*ParenExpr); ok {
@@ -412,12 +409,17 @@ func NewTypedComparisonExprWithSubOp(
 }
 
 // NewTypedIndirectionExpr returns a new IndirectionExpr that is verified to be well-typed.
-func NewTypedIndirectionExpr(expr, index TypedExpr, typ *types.T) *IndirectionExpr {
+func NewTypedIndirectionExpr(expr, beginIndex TypedExpr, endIndex TypedExpr, isSlice bool, typ *types.T) *IndirectionExpr {
 	node := &IndirectionExpr{
 		Expr:        expr,
-		Indirection: ArraySubscripts{&ArraySubscript{Begin: index}},
+		Indirection: ArraySubscripts{&ArraySubscript{Begin: beginIndex, End: endIndex, Slice: isSlice}},
 	}
-	node.typ = typ
+
+	if isSlice {
+		node.typ = types.MakeArray(typ)
+	} else {
+		node.typ = typ
+	}
 	return node
 }
 
@@ -1220,18 +1222,14 @@ func NewTypedUnaryExpr(op UnaryOperator, expr TypedExpr, typ *types.T) *UnaryExp
 	node := &UnaryExpr{Operator: op, Expr: expr}
 	node.typ = typ
 	innerType := expr.ResolvedType()
-
-	_ = UnaryOps[op.Symbol].ForEachUnaryOp(func(o *UnaryOp) error {
+	for _, o := range UnaryOps[op.Symbol] {
+		o := o.(*UnaryOp)
 		if innerType.Equivalent(o.Typ) && node.typ.Equivalent(o.ReturnType) {
 			node.op = o
-			return iterutil.StopIteration()
+			return node
 		}
-		return nil
-	})
-	if node.op == nil {
-		panic(errors.AssertionFailedf("invalid TypedExpr with unary op %d: %s", op.Symbol, expr))
 	}
-	return node
+	panic(errors.AssertionFailedf("invalid TypedExpr with unary op %d: %s", op.Symbol, expr))
 }
 
 // FuncExpr represents a function call.

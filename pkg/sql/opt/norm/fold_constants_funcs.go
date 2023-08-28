@@ -11,7 +11,6 @@
 package norm
 
 import (
-	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
@@ -42,7 +41,7 @@ import (
 //
 // Examples illustrating the various cases:
 //
-//  1. Prepare and execute query with placeholders
+//  1) Prepare and execute query with placeholders
 //
 //     SELECT * FROM t WHERE time > now() - $1
 //
@@ -52,7 +51,7 @@ import (
 //     folded, along with the subtraction. If we have an index on time, we will
 //     use it.
 //
-//  2. Prepare and execute query without placeholders
+//  2) Prepare and execute query without placeholders
 //
 //     SELECT * FROM t WHERE time > now() - '1 minute'::INTERVAL
 //
@@ -64,7 +63,7 @@ import (
 //     placeholders here, but AssignPlaceholders will nevertheless recreate the
 //     expression, allowing folding to happen.
 //
-//  3. Execute query without placeholders
+//  3) Execute query without placeholders
 //
 //     SELECT * FROM t WHERE time > now() - '1 minute'::INTERVAL
 //
@@ -74,6 +73,7 @@ import (
 //     the plan cache. In the future, we may want to detect queries that are
 //     re-executed frequently and cache a non-folded version like in the prepare
 //     case.
+//
 type FoldingControl struct {
 	// allowStable controls whether canFoldOperator returns true or false for
 	// volatility.Stable.
@@ -291,7 +291,7 @@ func (c *CustomFuncs) FoldBinary(
 	}
 
 	lDatum, rDatum := memo.ExtractConstDatum(left), memo.ExtractConstDatum(right)
-	result, err := eval.BinaryOp(c.f.ctx, c.f.evalCtx, o.EvalOp, lDatum, rDatum)
+	result, err := eval.BinaryOp(c.f.evalCtx, o.EvalOp, lDatum, rDatum)
 	if err != nil {
 		return nil, false
 	}
@@ -310,7 +310,7 @@ func (c *CustomFuncs) FoldUnary(op opt.Operator, input opt.ScalarExpr) (_ opt.Sc
 		return nil, false
 	}
 
-	result, err := eval.UnaryOp(c.f.ctx, c.f.evalCtx, o.EvalOp, datum)
+	result, err := eval.UnaryOp(c.f.evalCtx, o.EvalOp, datum)
 	if err != nil {
 		return nil, false
 	}
@@ -333,7 +333,7 @@ func (c *CustomFuncs) foldStringToRegclassCast(
 	if err != nil {
 		return nil, err
 	}
-	ds, resName, err := c.f.catalog.ResolveDataSource(c.f.ctx, flags, tn)
+	ds, resName, err := c.f.catalog.ResolveDataSource(c.f.evalCtx.Context, flags, tn)
 	if err != nil {
 		return nil, err
 	}
@@ -368,17 +368,8 @@ func (c *CustomFuncs) FoldCast(input opt.ScalarExpr, typ *types.T) (_ opt.Scalar
 	datum := memo.ExtractConstDatum(input)
 	texpr := tree.NewTypedCastExpr(datum, typ)
 
-	result, err := eval.Expr(c.f.ctx, c.f.evalCtx, texpr)
+	result, err := eval.Expr(c.f.evalCtx, texpr)
 	if err != nil {
-		// Casts can require KV operations. KV errors are not safe to swallow.
-		// Check if the error is a KV error, and, if so, propagate it rather
-		// than swallowing it. See #85677.
-		// TODO(mgartner): Ideally, casts that can error and cause adverse
-		// side-effects would be marked as volatile so that they are not folded.
-		// That would eliminate the need for this special error handling.
-		if errors.HasInterface(err, (*roachpb.ErrorDetailInterface)(nil)) {
-			panic(err)
-		}
 		return nil, false
 	}
 
@@ -403,17 +394,8 @@ func (c *CustomFuncs) FoldAssignmentCast(
 	}
 
 	datum := memo.ExtractConstDatum(input)
-	result, err := eval.PerformAssignmentCast(c.f.ctx, c.f.evalCtx, datum, typ)
+	result, err := eval.PerformAssignmentCast(c.f.evalCtx, datum, typ)
 	if err != nil {
-		// Casts can require KV operations. KV errors are not safe to swallow.
-		// Check if the error is a KV error, and, if so, propagate it rather
-		// than swallowing it. See #85677.
-		// TODO(mgartner): Ideally, casts that can error and cause adverse
-		// side-effects would be marked as volatile so that they are not folded.
-		// That would eliminate the need for this special error handling.
-		if errors.HasInterface(err, (*roachpb.ErrorDetailInterface)(nil)) {
-			panic(err)
-		}
 		return nil, false
 	}
 
@@ -424,20 +406,20 @@ func (c *CustomFuncs) FoldAssignmentCast(
 // TO is monotonic.
 // That is, if a and b are values of type FROM, then
 //
-//  1. a = b implies a::TO = b::TO and
-//  2. a < b implies a::TO <= b::TO
+//   1. a = b implies a::TO = b::TO and
+//   2. a < b implies a::TO <= b::TO
 //
 // Property (1) can be violated by cases like:
 //
-//	'-0'::FLOAT = '0'::FLOAT, but '-0'::FLOAT::STRING != '0'::FLOAT::STRING
+//   '-0'::FLOAT = '0'::FLOAT, but '-0'::FLOAT::STRING != '0'::FLOAT::STRING
 //
 // Property (2) can be violated by cases like:
 //
-//	2 < 10, but  2::STRING > 10::STRING.
+//   2 < 10, but  2::STRING > 10::STRING.
 //
 // Note that the stronger version of (2),
 //
-//	a < b implies a::TO < b::TO
+//   a < b implies a::TO < b::TO
 //
 // is not required, for instance this is not generally true of conversion from
 // a TIMESTAMP to a DATE, but certain such conversions can still generate spans
@@ -484,7 +466,7 @@ func (c *CustomFuncs) FoldComparison(
 		lDatum, rDatum = rDatum, lDatum
 	}
 
-	result, err := eval.BinaryOp(c.f.ctx, c.f.evalCtx, o.EvalOp, lDatum, rDatum)
+	result, err := eval.BinaryOp(c.f.evalCtx, o.EvalOp, lDatum, rDatum)
 	if err != nil {
 		return nil, false
 	}
@@ -497,20 +479,52 @@ func (c *CustomFuncs) FoldComparison(
 // FoldIndirection evaluates an array indirection operator with constant inputs.
 // It returns the referenced array element as a constant value, or ok=false if
 // the evaluation results in an error.
-func (c *CustomFuncs) FoldIndirection(input, index opt.ScalarExpr) (_ opt.ScalarExpr, ok bool) {
+func (c *CustomFuncs) FoldIndirection(input, beginIndex opt.ScalarExpr, endIndex opt.ScalarExpr, isSlice opt.ScalarExpr) (_ opt.ScalarExpr, ok bool) {
 	// Index is 1-based, so convert to 0-based.
-	indexD := memo.ExtractConstDatum(index)
+	var sliceFlag bool 
+	beginIndexD := memo.ExtractConstDatum(beginIndex)
+	endIndexD := memo.ExtractConstDatum(endIndex)
+	isSliceConst := memo.ExtractConstDatum(isSlice)
+	if sliceCheck, ok := isSliceConst.(*tree.DBool); ok {
+		sliceFlag = bool(*sliceCheck)
+	}
+	var beginIdx int
+	var endIdx int
 
 	// Case 1: The input is a static array constructor.
 	if arr, ok := input.(*memo.ArrayExpr); ok {
-		if indexInt, ok := indexD.(*tree.DInt); ok {
-			indexI := int(*indexInt) - 1
+
+		if sliceFlag {
+			if beginIndexD == tree.DNull {
+				beginIdx = 0
+			}
+
+			if beginIndexInt, ok := beginIndexD.(*tree.DInt); ok {
+				beginIdx = int(*beginIndexInt) - 1
+			}
+
+			if endIndexD == tree.DNull {
+				endIdx = len(arr.Elems)
+			}
+
+			if endIndexInt, ok := endIndexD.(*tree.DInt); ok {
+				endIdx = int(*endIndexInt)
+			}
+
+			if beginIdx >= 0 && beginIdx < len(arr.Elems) && endIdx <= len(arr.Elems) && beginIdx <= endIdx {
+				return c.f.ConstructArray(arr.Elems[beginIdx:endIdx], arr.Typ.ArrayContents()), true
+			}
+		}
+		
+
+		if beginIndexInt, ok := beginIndexD.(*tree.DInt); ok {
+			indexI := int(*beginIndexInt) - 1
 			if indexI >= 0 && indexI < len(arr.Elems) {
 				return arr.Elems[indexI], true
 			}
 			return c.f.ConstructNull(arr.Typ.ArrayContents()), true
 		}
-		if indexD == tree.DNull {
+		if beginIndexD == tree.DNull {
 			return c.f.ConstructNull(arr.Typ.ArrayContents()), true
 		}
 		return nil, false
@@ -528,8 +542,8 @@ func (c *CustomFuncs) FoldIndirection(input, index opt.ScalarExpr) (_ opt.Scalar
 			panic(errors.AssertionFailedf("expected array or json; found %s", input.DataType().SQLString()))
 		}
 		inputD := memo.ExtractConstDatum(input)
-		texpr := tree.NewTypedIndirectionExpr(inputD, indexD, resolvedType)
-		result, err := eval.Expr(c.f.ctx, c.f.evalCtx, texpr)
+		texpr := tree.NewTypedIndirectionExpr(inputD, beginIndexD, endIndexD, sliceFlag, resolvedType)
+		result, err := eval.Expr(c.f.evalCtx, texpr)
 		if err == nil {
 			return c.f.ConstructConstVal(result, texpr.ResolvedType()), true
 		}
@@ -562,7 +576,7 @@ func (c *CustomFuncs) FoldColumnAccess(
 		datum := memo.ExtractConstDatum(input)
 
 		texpr := tree.NewTypedColumnAccessExpr(datum, "" /* by-index access */, int(idx))
-		result, err := eval.Expr(c.f.ctx, c.f.evalCtx, texpr)
+		result, err := eval.Expr(c.f.evalCtx, texpr)
 		if err == nil {
 			return c.f.ConstructConstVal(result, texpr.ResolvedType()), true
 		}
@@ -575,9 +589,9 @@ func (c *CustomFuncs) FoldColumnAccess(
 // to Null when any of its arguments are Null. A function can be folded to Null
 // in this case if all of the following are true:
 //
-//  1. It is not evaluated when any of its arguments are null
-//     (CalledOnNullInput=false).
-//  2. It is a normal function, not an aggregate, window, or generator.
+//   1. It is not evaluated when any of its arguments are null
+//      (CalledOnNullInput=false).
+//   2. It is a normal function, not an aggregate, window, or generator.
 //
 // See FoldFunctionWithNullArg for more details.
 func (c *CustomFuncs) CanFoldFunctionWithNullArg(private *memo.FunctionPrivate) bool {
@@ -633,7 +647,7 @@ func (c *CustomFuncs) FoldFunction(
 		private.Overload,
 	)
 
-	result, err := eval.Expr(c.f.ctx, c.f.evalCtx, fn)
+	result, err := eval.Expr(c.f.evalCtx, fn)
 	if err != nil {
 		return nil, false
 	}

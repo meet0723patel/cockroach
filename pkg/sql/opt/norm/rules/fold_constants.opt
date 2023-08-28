@@ -153,9 +153,11 @@ $result
 [FoldIndirection, Normalize]
 (Indirection
     $input:*
-    $index:* &
-        (IsConstValueOrGroupOfConstValues $index) &
-        (Let ($result $ok):(FoldIndirection $input $index) $ok)
+    $beginIndex:*
+    $endIndex:*
+    $slice:* &
+        (IsConstValueOrGroupOfConstValues $beginIndex) & (IsConstValueOrGroupOfConstValues $endIndex) &
+        (Let ($result $ok):(FoldIndirection $input $beginIndex $endIndex $slice) $ok)
 )
 =>
 $result

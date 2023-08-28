@@ -12,6 +12,7 @@ package execbuilder
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
@@ -316,7 +317,6 @@ func (b *Builder) buildCase(ctx *buildScalarCtx, scalar opt.ScalarExpr) (tree.Ty
 	}
 
 	// Extract the list of WHEN ... THEN ... clauses.
-	whensVals := make([]tree.When, len(cas.Whens))
 	whens := make([]*tree.When, len(cas.Whens))
 	for i, expr := range cas.Whens {
 		whenExpr := expr.(*memo.WhenExpr)
@@ -328,8 +328,7 @@ func (b *Builder) buildCase(ctx *buildScalarCtx, scalar opt.ScalarExpr) (tree.Ty
 		if err != nil {
 			return nil, err
 		}
-		whensVals[i] = tree.When{Cond: cond, Val: val}
-		whens[i] = &whensVals[i]
+		whens[i] = &tree.When{Cond: cond, Val: val}
 	}
 
 	elseExpr, err := b.buildScalar(ctx, cas.OrElse)
@@ -459,17 +458,32 @@ func (b *Builder) buildAnyScalar(
 func (b *Builder) buildIndirection(
 	ctx *buildScalarCtx, scalar opt.ScalarExpr,
 ) (tree.TypedExpr, error) {
+	fmt.Println(scalar)
 	expr, err := b.buildScalar(ctx, scalar.Child(0).(opt.ScalarExpr))
 	if err != nil {
 		return nil, err
 	}
 
-	index, err := b.buildScalar(ctx, scalar.Child(1).(opt.ScalarExpr))
+	beginIndex, err := b.buildScalar(ctx, scalar.Child(1).(opt.ScalarExpr))
 	if err != nil {
 		return nil, err
 	}
 
-	return tree.NewTypedIndirectionExpr(expr, index, scalar.DataType()), nil
+	endIndex, err := b.buildScalar(ctx, scalar.Child(2).(opt.ScalarExpr))
+	if err != nil {
+		return nil, err
+	}
+
+	isSlice, err := b.buildScalar(ctx, scalar.Child(3).(opt.ScalarExpr))
+	if err != nil {
+		return nil, err
+	}
+
+	if slice, ok := isSlice.(*tree.DBool); ok {
+		return tree.NewTypedIndirectionExpr(expr, beginIndex, endIndex, bool(*slice), scalar.DataType()), nil
+	}
+
+	return tree.NewTypedIndirectionExpr(expr, beginIndex, endIndex, false, scalar.DataType()), nil
 }
 
 func (b *Builder) buildCollate(ctx *buildScalarCtx, scalar opt.ScalarExpr) (tree.TypedExpr, error) {
@@ -500,7 +514,7 @@ func (b *Builder) buildArrayFlatten(
 	typ := b.mem.Metadata().ColumnMeta(af.RequestedCol).Type
 	e := b.addSubquery(
 		exec.SubqueryAllRows, typ, root.root, af.OriginalExpr,
-		int64(af.Input.Relational().Statistics().RowCountIfAvailable()),
+		int64(af.Input.Relational().Stats.RowCountIfAvailable()),
 	)
 
 	return tree.NewTypedArrayFlattenExpr(e), nil
@@ -557,7 +571,7 @@ func (b *Builder) buildAny(ctx *buildScalarCtx, scalar opt.ScalarExpr) (tree.Typ
 	typs := types.MakeTuple(contents)
 	subqueryExpr := b.addSubquery(
 		exec.SubqueryAnyRows, typs, plan.root, any.OriginalExpr,
-		int64(any.Input.Relational().Statistics().RowCountIfAvailable()),
+		int64(any.Input.Relational().Stats.RowCountIfAvailable()),
 	)
 
 	// Build the scalar value that is compared against each row.
@@ -593,7 +607,7 @@ func (b *Builder) buildExistsSubquery(
 
 	return b.addSubquery(
 		exec.SubqueryExists, types.Bool, plan.root, exists.OriginalExpr,
-		int64(exists.Input.Relational().Statistics().RowCountIfAvailable()),
+		int64(exists.Input.Relational().Stats.RowCountIfAvailable()),
 	), nil
 }
 
@@ -623,7 +637,7 @@ func (b *Builder) buildSubquery(
 
 	return b.addSubquery(
 		exec.SubqueryOneRow, subquery.Typ, plan.root, subquery.OriginalExpr,
-		int64(input.Relational().Statistics().RowCountIfAvailable()),
+		int64(input.Relational().Stats.RowCountIfAvailable()),
 	), nil
 }
 
@@ -723,7 +737,7 @@ func (b *Builder) buildUDF(ctx *buildScalarCtx, scalar opt.ScalarExpr) (tree.Typ
 		// TODO(mgartner): Add support for WITH expressions inside UDF bodies.
 		// TODO(mgartner): Add support for subqueries inside UDF bodies.
 		ef := ref.(exec.Factory)
-		eb := New(ctx, ef, &o, f.Memo(), b.catalog, newRightSide, b.evalCtx, false /* allowAutoCommit */, b.IsANSIDML)
+		eb := New(ef, &o, f.Memo(), b.catalog, newRightSide, b.evalCtx, false /* allowAutoCommit */)
 		eb.disableTelemetry = true
 		plan, err := eb.Build()
 		if err != nil {

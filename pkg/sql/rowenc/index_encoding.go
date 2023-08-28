@@ -236,8 +236,6 @@ func NeededColumnFamilyIDs(
 		return families
 	}
 
-	secondaryStoredColumnIDs := index.CollectSecondaryStoredColumnIDs()
-
 	// Iterate over the column families to find which ones contain needed columns.
 	// We also keep track of whether all of the needed families' columns are
 	// nullable, since this means we need column family 0 as a sentinel, even if
@@ -265,21 +263,10 @@ func NeededColumnFamilyIDs(
 				needed = true
 			}
 			if !columns[columnOrdinal].IsNullable() && !indexedCols.Contains(columnOrdinal) {
-				// This column is non-nullable and is not indexed, thus, if it
-				// is stored in the value part of the KV entry (which is the
-				// case for the primary indexes as well as when the column is
-				// included in STORING clause of the secondary index), the
-				// column family is non-nullable too.
-				//
-				// Note that for unique secondary indexes more columns might be
-				// included in the value part (namely "key suffix" columns when
-				// the indexed columns have a NULL value), but we choose to
-				// ignore those here. This is needed for correctness, and as a
-				// result we might fetch the zeroth column family when it turns
-				// out to be not needed.
-				if index.Primary() || secondaryStoredColumnIDs.Contains(columnID) {
-					nullable = false
-				}
+				// This column is non-nullable and is not indexed, thus, it must
+				// be stored in the value part of the KV entry. As a result,
+				// this column family is non-nullable too.
+				nullable = false
 			}
 		}
 		if needed {
@@ -585,8 +572,7 @@ func EncodeInvertedIndexTableKeys(
 	if val == tree.DNull {
 		return nil, nil
 	}
-	// TODO(yuzefovich): can val ever be a placeholder?
-	datum := tree.UnwrapDOidWrapper(val)
+	datum := eval.UnwrapDatum(nil, val)
 	switch val.ResolvedType().Family() {
 	case types.JsonFamily:
 		// We do not need to pass the version for JSON types, since all prior
@@ -620,12 +606,12 @@ func EncodeInvertedIndexTableKeys(
 // set operations that must be applied on the spans read during execution. See
 // comments in the SpanExpression definition for details.
 func EncodeContainingInvertedIndexSpans(
-	ctx context.Context, evalCtx *eval.Context, val tree.Datum,
+	evalCtx *eval.Context, val tree.Datum,
 ) (invertedExpr inverted.Expression, err error) {
 	if val == tree.DNull {
 		return nil, nil
 	}
-	datum := eval.UnwrapDatum(ctx, evalCtx, val)
+	datum := eval.UnwrapDatum(evalCtx, val)
 	switch val.ResolvedType().Family() {
 	case types.JsonFamily:
 		return json.EncodeContainingInvertedIndexSpans(nil /* inKey */, val.(*tree.DJSON).JSON)
@@ -651,12 +637,12 @@ func EncodeContainingInvertedIndexSpans(
 // span expression returned will never be tight. See comments in the
 // SpanExpression definition for details.
 func EncodeContainedInvertedIndexSpans(
-	ctx context.Context, evalCtx *eval.Context, val tree.Datum,
+	evalCtx *eval.Context, val tree.Datum,
 ) (invertedExpr inverted.Expression, err error) {
 	if val == tree.DNull {
 		return nil, nil
 	}
-	datum := eval.UnwrapDatum(ctx, evalCtx, val)
+	datum := eval.UnwrapDatum(evalCtx, val)
 	switch val.ResolvedType().Family() {
 	case types.ArrayFamily:
 		return encodeContainedArrayInvertedIndexSpans(val.(*tree.DArray), nil /* inKey */)
@@ -680,12 +666,12 @@ func EncodeContainedInvertedIndexSpans(
 // The spans are returned in an inverted.SpanExpression, which represents the
 // set operations that must be applied on the spans read during execution.
 func EncodeExistsInvertedIndexSpans(
-	ctx context.Context, evalCtx *eval.Context, val tree.Datum, all bool,
+	evalCtx *eval.Context, val tree.Datum, all bool,
 ) (invertedExpr inverted.Expression, err error) {
 	if val == tree.DNull {
 		return nil, nil
 	}
-	datum := eval.UnwrapDatum(ctx, evalCtx, val)
+	datum := eval.UnwrapDatum(evalCtx, val)
 	switch val.ResolvedType().Family() {
 	case types.StringFamily:
 		// val could be a DOidWrapper, so we need to use the unwrapped datum
@@ -733,12 +719,12 @@ func EncodeExistsInvertedIndexSpans(
 // span expression returned will be tight. See comments in the
 // SpanExpression definition for details.
 func EncodeOverlapsInvertedIndexSpans(
-	ctx context.Context, evalCtx *eval.Context, val tree.Datum,
+	evalCtx *eval.Context, val tree.Datum,
 ) (invertedExpr inverted.Expression, err error) {
 	if val == tree.DNull {
 		return nil, nil
 	}
-	datum := eval.UnwrapDatum(ctx, evalCtx, val)
+	datum := eval.UnwrapDatum(evalCtx, val)
 	switch val.ResolvedType().Family() {
 	case types.ArrayFamily:
 		return encodeOverlapsArrayInvertedIndexSpans(val.(*tree.DArray), nil /* inKey */)
@@ -883,9 +869,9 @@ func encodeOverlapsArrayInvertedIndexSpans(
 	// or contains only NULLs and thus has effective length 0,
 	// we cannot generate an inverted expression.
 
-	// TODO: This should be a contradiction which is treated as a no-op.
+	// Return empty spans in this case to ensure that empty and null arrays evalutate to false for the overlap operator.
 	if val.Array.Len() == 0 || !val.HasNonNulls {
-		return inverted.NonInvertedColExpression{}, nil
+		return &inverted.SpanExpression{Tight: true, Unique: true}, nil
 	}
 
 	// We always exclude nulls from the list of keys when evaluating &&.
@@ -914,7 +900,7 @@ func encodeOverlapsArrayInvertedIndexSpans(
 // expression must match every trigram in the input. Otherwise, it will match
 // any trigram in the input.
 func EncodeTrigramSpans(s string, allMustMatch bool) (inverted.Expression, error) {
-	// We do not pad the trigrams when allMustMatch is true. To see why, observe
+	// We do not pad the trigrams when searching the index. To see why, observe
 	// the keys that we insert for a string "zfooz":
 	//
 	// "  z", " zf", "zfo", "foo", "foz", "oz "
@@ -923,7 +909,7 @@ func EncodeTrigramSpans(s string, allMustMatch bool) (inverted.Expression, error
 	// keys as well, we'd be searching for the key "  f", which doesn't exist
 	// in the index for zfooz, even though zfooz is like %foo%.
 	keys, err := encodeTrigramInvertedIndexTableKeys(s, nil, /* inKey */
-		descpb.LatestIndexDescriptorVersion, !allMustMatch /* pad */)
+		descpb.LatestIndexDescriptorVersion, false /* pad */)
 	if err != nil {
 		return nil, err
 	}

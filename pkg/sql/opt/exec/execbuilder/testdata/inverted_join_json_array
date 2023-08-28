@@ -735,3 +735,27 @@ vectorized: true
           missing stats
           table: array_tab@array_tab_pkey
           spans: FULL SCAN
+
+# This query performs an inverted join.
+query T
+EXPLAIN SELECT * FROM array_tab@foo_inv AS a1, array_tab AS a2 WHERE a1.b && a2.b ORDER BY a1.a, a2.a
+----
+distribution: local
+vectorized: true
+·
+• sort
+│ order: +a,+a
+│
+└── • lookup join
+    │ table: array_tab@array_tab_pkey
+    │ equality: (a) = (a)
+    │ equality cols are key
+    │ pred: b && b
+    │
+    └── • inverted join
+        │ table: array_tab@foo_inv
+        │
+        └── • scan
+              missing stats
+              table: array_tab@array_tab_pkey
+              spans: FULL SCAN
